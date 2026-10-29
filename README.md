@@ -1,3 +1,18 @@
+# Job Posting Analyzer with AI
+
+**English** · [Português abaixo](#analisador-de-vagas-com-ia)
+
+Python CLI (with an optional FastAPI API) that reads a job posting, uses an LLM (**Google Gemini** or **OpenAI**, called via httpx) with **structured JSON output** to extract title, seniority, required and nice-to-have skills, computes a deterministic match score (0–100) against your skills, and stores everything in **SQLite** for **SQL** reports.
+
+- Provider selected by env var: `LLM_PROVIDER=gemini` or `openai`
+- SQLite with `schema.sql` and parameterized queries (no ORM)
+- Reports: most requested skills, postings by seniority with average match, posting ranking
+- 11 pytest tests (LLM mocked in tests), ruff lint, GitHub Actions CI
+
+See the Portuguese section below for setup and usage details.
+
+---
+
 # Analisador de Vagas com IA
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
