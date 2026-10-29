@@ -9,3 +9,6 @@ build/
 dist/
 .pytest_cache/
 .ruff_cache/
+.vercel
+.env*
+!.env.example

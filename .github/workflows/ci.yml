@@ -17,3 +17,5 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -v
+      - name: Evals (offline mode)
+        run: python -m analisador_vagas.evals --markdown >> "$GITHUB_STEP_SUMMARY"

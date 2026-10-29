@@ -44,7 +44,7 @@ class LLMClient(Protocol):
 class GeminiClient:
     nome = "gemini"
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash", timeout: float = 60) -> None:
+    def __init__(self, api_key: str, model: str = "gemini-3.5-flash", timeout: float = 60) -> None:
         self.api_key, self.model, self.timeout = api_key, model, timeout
 
     def extrair(self, texto_vaga: str) -> dict:
@@ -69,6 +69,22 @@ class GeminiClient:
             texto = r.json()["candidates"][0]["content"]["parts"][0]["text"]
             return json.loads(texto)
         except (KeyError, IndexError, json.JSONDecodeError) as e:
+            raise LLMError(f"Resposta inválida do Gemini: {e}") from e
+
+    def responder(self, prompt: str) -> str:
+        """Geração de texto livre (usada pelo RAG)."""
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        )
+        body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0}}
+        r = httpx.post(
+            url, json=body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout
+        )
+        if r.status_code != 200:
+            raise LLMError(f"Gemini HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
             raise LLMError(f"Resposta inválida do Gemini: {e}") from e
 
 
@@ -102,6 +118,26 @@ class OpenAIClient:
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise LLMError(f"Resposta inválida da OpenAI: {e}") from e
 
+    def responder(self, prompt: str) -> str:
+        """Geração de texto livre (usada pelo RAG)."""
+        body = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        r = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=self.timeout,
+        )
+        if r.status_code != 200:
+            raise LLMError(f"OpenAI HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            raise LLMError(f"Resposta inválida da OpenAI: {e}") from e
+
 
 def criar_cliente_do_ambiente() -> LLMClient:
     """Cria o cliente a partir de LLM_PROVIDER (gemini|openai) e da chave correspondente."""
@@ -110,7 +146,7 @@ def criar_cliente_do_ambiente() -> LLMClient:
         key = os.getenv("GEMINI_API_KEY")
         if not key:
             raise LLMError("Defina GEMINI_API_KEY no ambiente.")
-        return GeminiClient(key, os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+        return GeminiClient(key, os.getenv("GEMINI_MODEL", "gemini-3.5-flash"))
     if provedor == "openai":
         key = os.getenv("OPENAI_API_KEY")
         if not key:

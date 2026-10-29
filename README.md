@@ -1,164 +1,102 @@
-# Job Posting Analyzer with AI
+# Job Posting Analyzer with AI — RAG · Tool-calling Agent · Evals
 
-**English** · [Português abaixo](#analisador-de-vagas-com-ia)
-
-Python CLI (with an optional FastAPI API) that reads a job posting, uses an LLM (**Google Gemini** or **OpenAI**, called via httpx) with **structured JSON output** to extract title, seniority, required and nice-to-have skills, computes a deterministic match score (0–100) against your skills, and stores everything in **SQLite** for **SQL** reports.
-
-- Provider selected by env var: `LLM_PROVIDER=gemini` or `openai`
-- SQLite with `schema.sql` and parameterized queries (no ORM)
-- Reports: most requested skills, postings by seniority with average match, posting ranking
-- 11 pytest tests (LLM mocked in tests), ruff lint, GitHub Actions CI
-
-See the Portuguese section below for setup and usage details.
-
----
-
-# Analisador de Vagas com IA
-
+[![CI](https://github.com/vagner67/analisador-vagas-ia/actions/workflows/ci.yml/badge.svg)](https://github.com/vagner67/analisador-vagas-ia/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-CLI em Python (com endpoint FastAPI opcional) que lê o texto de uma vaga de emprego, usa um LLM (**Google Gemini** ou **OpenAI**) com **saída JSON estruturada** para extrair as informações principais, calcula o quanto a vaga combina com as suas skills e guarda tudo em **SQLite** para gerar relatórios com **SQL**.
+**Live demo:** https://analisador-vagas-ia.vercel.app (runs in labelled *offline mode*: no API key is configured on the demo)
 
-## Problema
+**English** · [Português](#português)
 
-Quem procura emprego lê dezenas de vagas com formatos diferentes. É difícil comparar rapidamente o que cada uma pede, saber o quanto você se encaixa e descobrir quais tecnologias o mercado mais pede. Este projeto automatiza essa leitura e transforma o texto livre em dados consultáveis.
+Python + FastAPI service that turns free-text job postings into structured data with an LLM
+(**Gemini** or **OpenAI**, structured JSON output via `httpx`), stores them in **SQLite**, and adds:
 
-## Funcionalidades
+- **RAG** (`perguntar`): ask questions about the stored postings; answers **cite posting ids** (`[#id]`).
+  Embeddings from the Gemini (`gemini-embedding-001`) or OpenAI (`text-embedding-3-small`) API, vectors cached in SQLite
+  (`vaga_embeddings`). Without a key: pure-Python **TF-IDF** retrieval + extractive answer, labelled `offline`.
+- **Agent with function calling** (`agente`): OpenAI `tools` / Gemini `functionDeclarations` loop with three tools:
+  `buscar_vagas` (RAG search), `calcular_match`, `gerar_relatorio_sql`. Every tool call is returned in `passos`.
+  Without a key: a deterministic regex router, labelled `offline`.
+- **Evals**: hand-labelled dataset in `tests/evals/*.jsonl` → skill-extraction precision/recall/F1 and retrieval hit@k/MRR,
+  enforced as regression floors in pytest and published in every CI run summary.
+- **Docker** + docker-compose; **Vercel** serverless deploy; ruff + pytest + GitHub Actions.
 
-- Extração via LLM de: **título**, **senioridade**, **skills obrigatórias** e **skills desejáveis** (JSON Schema forçado na resposta).
-- Provedor escolhido por variável de ambiente: `LLM_PROVIDER=gemini` ou `openai`.
-- **Match score** (0–100) determinístico contra a sua lista de skills: obrigatórias pesam 80%, desejáveis 20%.
-- Persistência em SQLite com `schema.sql` e consultas **parametrizadas** (sem ORM).
-- Relatórios SQL: skills mais pedidas, vagas por senioridade com match médio, ranking de vagas.
-- Entrada por arquivo ou `stdin`; API REST opcional com FastAPI.
-- Testes com pytest (LLM simulado apenas nos testes), lint com ruff.
+No heavy dependencies (no torch / numpy / vector DB): runtime deps are `httpx` and `fastapi`.
 
-## Arquitetura
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[Texto da vaga<br/>arquivo / stdin / POST] --> B[CLI / FastAPI]
-    B --> C[service.analisar]
-    C --> D{LLM_PROVIDER}
-    D -->|gemini| E[Gemini API<br/>responseSchema]
-    D -->|openai| F[OpenAI API<br/>json_schema]
-    E --> G[AnaliseVaga + match score]
-    F --> G
-    G --> H[(SQLite<br/>vagas / vaga_skills)]
-    H --> I[Relatórios SQL]
+    U[User / Web demo / CLI] --> API[FastAPI · api/index.py on Vercel]
+    API -->|/analisar| EX{API key?}
+    EX -->|yes| LLM[Gemini / OpenAI<br/>structured JSON]
+    EX -->|no| KW[Keyword extractor<br/>offline]
+    LLM --> DB[(SQLite<br/>vagas · vaga_skills · vaga_embeddings)]
+    KW --> DB
+    API -->|/perguntar| RAG[RAG retriever]
+    RAG -->|key| EMB[Embeddings API<br/>vectors cached in SQLite]
+    RAG -->|no key| TF[TF-IDF offline]
+    RAG --> GEN[LLM answer with &#91;#id&#93; citations<br/>or extractive offline answer]
+    API -->|/agente| AG[Agent loop<br/>function calling / offline router]
+    AG --> T1[buscar_vagas] --> RAG
+    AG --> T2[calcular_match] --> DB
+    AG --> T3[gerar_relatorio_sql] --> DB
+    EV[Evals · tests/evals/*.jsonl] -.-> KW
+    EV -.-> TF
 ```
 
-```
-src/analisador_vagas/
-├── cli.py       # comandos analisar / relatorio
-├── api.py       # FastAPI opcional
-├── service.py   # orquestração
-├── llm.py       # clientes Gemini e OpenAI (REST via httpx)
-├── models.py    # dataclass + cálculo de match
-├── db.py        # SQL puro, parametrizado
-└── schema.sql   # esquema do banco
-```
-
-## Instalação
+## Run
 
 ```bash
-git clone https://github.com/vagner67/analisador-vagas-ia.git
-cd analisador-vagas-ia
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[api,dev]"
-cp .env.example .env   # preencha sua chave
+pip install -e ".[dev]"
+export GEMINI_API_KEY=...            # optional (or LLM_PROVIDER=openai + OPENAI_API_KEY)
+analisador-vagas analisar exemplos/vaga_exemplo.txt --skills python,sql
+analisador-vagas perguntar "Which postings require Kubernetes?"
+analisador-vagas agente "Qual o match da vaga 2 se eu sei python, sql e spark?"
+analisador-vagas relatorio top-skills
+uvicorn analisador_vagas.api:app      # POST /analisar /perguntar /agente · GET /relatorios/top-skills /health
+python -m analisador_vagas.evals --markdown
+docker compose up --build             # http://localhost:8000 (DEMO_SEED=1 loads example postings)
 ```
 
-As chaves de API são lidas **somente do ambiente** e nunca devem ser commitadas (`.env` está no `.gitignore`). Carregue o `.env` no shell, por exemplo: `set -a; source .env; set +a`.
+## Eval results (offline mode, actual output of `python -m analisador_vagas.evals --markdown`)
 
-## Uso
+| Eval (offline mode) | Metric | Value |
+|---|---|---|
+| Skill extraction (n=12 postings) | precision | 0.921 |
+| | recall | 0.795 |
+| | F1 | 0.853 |
+| Retrieval (TF-IDF, n=14 queries) | hit@1 | 0.929 |
+| | hit@3 | 0.929 |
+| | MRR | 0.929 |
 
-```bash
-# Analisar um arquivo
-analisador-vagas analisar exemplos/vaga_exemplo.txt --skills "python,sql,git"
+Dataset: 12 **hand-written, illustrative** postings (not scraped real ads) labelled manually, and 14 retrieval queries
+(incl. 2 English queries against Portuguese text — the lexical TF-IDF baseline misses one of them, which is why
+hit@k < 1). Keyword extraction misses skills outside its fixed vocabulary (e.g. dbt, Kafka, LangChain), hence recall 0.79.
+LLM-mode evals require an API key and are not part of CI.
 
-# Via stdin
-cat vaga.txt | analisador-vagas analisar - --skills "python,sql"
+Live check (manual run on 2026-10-29 with `GEMINI_API_KEY`, `gemini-embedding-001` + `gemini-3.5-flash`):
+"Quais vagas pedem Kubernetes?" → answer citing `[#7]` and `[#5]` (the two postings that list Kubernetes);
+the agent called `calcular_match(vaga_id=2, skills=[python, sql, spark])` and answered 48 with Airflow/AWS missing.
 
-# Só analisar, sem salvar
-analisador-vagas analisar vaga.txt --nao-salvar
-```
+---
 
-**Formato de saída (exemplo ilustrativo, não é um resultado real):**
+# Português
 
-```json
-{
-  "titulo": "Desenvolvedor(a) Python Júnior",
-  "senioridade": "junior",
-  "skills_obrigatorias": ["python", "sql", "git", "apis rest"],
-  "skills_desejaveis": ["fastapi", "docker", "llm"],
-  "match_score": 60.0,
-  "id": 1
-}
-```
+**Demo ao vivo:** https://analisador-vagas-ia.vercel.app (modo offline rotulado, sem chave de API)
 
-### Relatórios SQL
+Serviço Python + FastAPI que transforma vagas em dados estruturados com LLM (Gemini ou OpenAI), salva em SQLite e oferece:
 
-```bash
-analisador-vagas relatorio top-skills --limite 5
-analisador-vagas relatorio top-skills --so obrigatoria
-analisador-vagas relatorio senioridade
-analisador-vagas relatorio vagas
-```
+- **RAG** (`perguntar`): perguntas sobre as vagas salvas, com **citação dos ids** das vagas (`[#id]`). Embeddings via API
+  (Gemini/OpenAI) com vetores cacheados no SQLite; sem chave, **TF-IDF** em Python puro + resposta extrativa (rotulado *offline*).
+- **Agente com function calling** (`agente`): ferramentas `buscar_vagas`, `calcular_match`, `gerar_relatorio_sql`;
+  sem chave, roteador determinístico por regex (rotulado). Cada chamada de ferramenta aparece em `passos`.
+- **Evals**: dataset rotulado à mão em `tests/evals/` com precisão/recall de extração de skills e hit@k/MRR de recuperação,
+  verificados no pytest e publicados no resumo de cada execução do CI (tabela acima, números reais).
+- **Docker/docker-compose**, deploy **Vercel**, ruff, pytest e GitHub Actions.
 
-Consulta usada no relatório de skills mais pedidas:
+Como rodar: veja a seção *Run* acima (os comandos são os mesmos). O match score é determinístico:
+skills obrigatórias pesam 80% e desejáveis 20%. Sem chave de API, nenhuma resposta finge ser de LLM: o campo `modo` indica
+`offline`.
 
-```sql
-SELECT skill, COUNT(DISTINCT vaga_id) AS vagas
-FROM vaga_skills
-WHERE (? IS NULL OR tipo = ?)
-GROUP BY skill
-ORDER BY vagas DESC, skill
-LIMIT ?;
-```
-
-**Formato de saída (exemplo ilustrativo):**
-
-```json
-[
-  {"skill": "python", "vagas": 3},
-  {"skill": "sql", "vagas": 2}
-]
-```
-
-### API (opcional)
-
-```bash
-uvicorn analisador_vagas.api:app --reload
-curl -X POST localhost:8000/analisar -H "Content-Type: application/json" \
-  -d '{"texto": "Vaga para dev Python júnior com SQL", "skills": ["python"]}'
-curl localhost:8000/relatorios/top-skills
-```
-
-## Testes
-
-```bash
-pytest -v
-ruff check . && ruff format --check .
-```
-
-Os testes usam um cliente LLM falso (`tests/conftest.py`) e mocks de HTTP, então não precisam de chave nem fazem chamadas reais. Em uso normal, com a chave definida, as chamadas às APIs são reais.
-
-## Roadmap
-
-- [ ] Normalização de sinônimos de skills (ex.: "postgres" × "postgresql")
-- [ ] Importação de vagas a partir de URL
-- [ ] Extração de faixa salarial e modalidade (remoto/híbrido)
-- [ ] Dashboard simples com os relatórios
-- [ ] Suporte a outros provedores/modelos locais
-
-## Autor
-
-**Vagner Pereira** — estudante de Ciência da Computação na Unic (Cuiabá-MT), desenvolvedor júnior com foco em Python, SQL e IA generativa.
-
-[LinkedIn](https://www.linkedin.com/in/vagnerpereira-dev/) · [GitHub](https://github.com/vagner67)
-
-## Licença
-
-[MIT](LICENSE)
+Licença MIT.

@@ -16,3 +16,10 @@ CREATE TABLE IF NOT EXISTS vaga_skills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vaga_skills_skill ON vaga_skills(skill);
+
+CREATE TABLE IF NOT EXISTS vaga_embeddings (
+    vaga_id INTEGER NOT NULL REFERENCES vagas(id) ON DELETE CASCADE,
+    modelo TEXT NOT NULL,
+    vetor TEXT NOT NULL,
+    PRIMARY KEY (vaga_id, modelo)
+);

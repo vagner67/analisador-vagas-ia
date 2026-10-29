@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from importlib.resources import files
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -28,6 +29,26 @@ def _db_path() -> str:
     return os.getenv("VAGAS_DB", padrao)
 
 
+def _conectar():
+    """Abre o banco; na demo Vercel (ou DEMO_SEED=1) popula vagas de exemplo se vazio.
+
+    As vagas de exemplo são escritas à mão (ilustrativas) e analisadas no modo sem LLM.
+    """
+    conn = db.conectar(_db_path())
+    if (os.getenv("VERCEL") or os.getenv("DEMO_SEED") == "1") and not conn.execute(
+        "SELECT 1 FROM vagas LIMIT 1"
+    ).fetchone():
+        import json
+
+        texto = files("analisador_vagas").joinpath("dados/vagas_exemplo.jsonl").read_text("utf-8")
+        cli = HeuristicaClient()
+        for linha in texto.splitlines():
+            if linha.strip():
+                t = json.loads(linha)["texto"]
+                db.salvar(conn, analisar(t, cli, []), t, cli.nome + " [exemplo]")
+    return conn
+
+
 def _tem_chave() -> bool:
     return bool(os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
@@ -37,7 +58,7 @@ def get_cliente() -> LLMClient:
         return HeuristicaClient()
     try:
         return criar_cliente_do_ambiente()
-    except LLMError as e:
+    except (LLMError, httpx.HTTPError) as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
 
@@ -47,13 +68,13 @@ def analisar_vaga(entrada: Entrada, cliente: LLMClient = Depends(get_cliente)) -
         res = analisar(entrada.texto, cliente, entrada.skills)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
-    except LLMError as e:
+    except (LLMError, httpx.HTTPError) as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
     saida = res.to_dict()
     saida["modo"] = cliente.nome
     saida["usa_llm"] = not isinstance(cliente, HeuristicaClient)
     if entrada.salvar:
-        conn = db.conectar(_db_path())
+        conn = _conectar()
         try:
             saida["id"] = db.salvar(conn, res, entrada.texto, cliente.nome)
         finally:
@@ -63,9 +84,44 @@ def analisar_vaga(entrada: Entrada, cliente: LLMClient = Depends(get_cliente)) -
 
 @app.get("/relatorios/top-skills")
 def relatorio_top_skills(limite: int = 10) -> list[dict]:
-    conn = db.conectar(_db_path())
+    conn = _conectar()
     try:
         return db.top_skills(conn, limite)
+    finally:
+        conn.close()
+
+
+class Pergunta(BaseModel):
+    pergunta: str
+    k: int = 3
+
+
+@app.post("/perguntar")
+def perguntar(entrada: Pergunta) -> dict:
+    """RAG sobre as vagas salvas; resposta cita ids em `fontes`."""
+    from . import rag
+
+    conn = _conectar()
+    try:
+        emb, llm_ = rag.componentes_do_ambiente()
+        return rag.perguntar(conn, entrada.pergunta, entrada.k, emb, llm_).__dict__
+    except (LLMError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.post("/agente")
+def agente_endpoint(entrada: Pergunta) -> dict:
+    """Agente com tool-calling (buscar_vagas, calcular_match, gerar_relatorio_sql)."""
+    from . import agente
+    from .embeddings import embedder_do_ambiente
+
+    conn = _conectar()
+    try:
+        return agente.rodar(entrada.pergunta, conn, embedder_do_ambiente())
+    except (LLMError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     finally:
         conn.close()
 
