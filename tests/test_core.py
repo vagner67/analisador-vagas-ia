@@ -102,3 +102,37 @@ def test_api(fake, tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["id"] == 1
     assert "python" in [r["skill"] for r in c.get("/relatorios/top-skills").json()]
     api.app.dependency_overrides.clear()
+
+
+def test_heuristica_extrai():
+    from analisador_vagas.heuristica import HeuristicaClient
+
+    texto = (
+        "Desenvolvedor Python Sênior\nRequisitos: Python, SQL e Docker\nDesejável: AWS e FastAPI\n"
+    )
+    a = analisar(texto, HeuristicaClient(), ["python", "sql", "aws"])
+    assert a.titulo == "Desenvolvedor Python Sênior"
+    assert a.senioridade == "senior"
+    assert a.skills_obrigatorias == ["python", "sql", "docker"]
+    assert a.skills_desejaveis == ["fastapi", "aws"] or set(a.skills_desejaveis) == {
+        "aws",
+        "fastapi",
+    }
+    assert a.match_score == round(100 * (0.8 * 2 / 3 + 0.2 * 1 / 2), 1)
+
+
+def test_api_sem_chave_usa_modo_sem_llm(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from analisador_vagas import api
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("VAGAS_DB", str(tmp_path / "h.db"))
+    c = TestClient(api.app)
+    assert "Analisador de Vagas" in c.get("/").text
+    assert c.get("/health").json()["modo"] == "modo sem LLM"
+    r = c.post("/analisar", json={"texto": "Dev Júnior\nRequisitos: Python", "salvar": False})
+    d = r.json()
+    assert r.status_code == 200 and d["usa_llm"] is False and "sem LLM" in d["modo"]
+    assert d["skills_obrigatorias"] == ["python"] and d["senioridade"] == "junior"

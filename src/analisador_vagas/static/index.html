@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analisador de Vagas IA — demo</title>
+<style>body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#222}
+textarea,input{width:100%;box-sizing:border-box;font:inherit;padding:.5rem}textarea{height:220px}
+button{margin-top:.6rem;padding:.6rem 1.2rem;font:inherit;cursor:pointer}.tag{display:inline-block;background:#eef;border-radius:4px;padding:2px 8px;margin:2px}
+.aviso{background:#fff4d6;border:1px solid #e6c35c;padding:.5rem;border-radius:4px}.score{font-size:2rem;font-weight:bold}</style></head>
+<body><h1>Analisador de Vagas IA</h1>
+<p>Cole a descrição de uma vaga e (opcionalmente) suas skills. Código: <a href="https://github.com/vagner67/analisador-vagas-ia">github.com/vagner67/analisador-vagas-ia</a> · API: <a href="/docs">/docs</a></p>
+<label>Descrição da vaga</label><textarea id="texto" placeholder="Desenvolvedor Python Pleno&#10;Requisitos: Python, SQL, Docker&#10;Desejável: AWS, FastAPI"></textarea>
+<label>Suas skills (separadas por vírgula)</label><input id="skills" value="python, sql, fastapi">
+<button id="btn">Analisar</button><div id="out"></div>
+<script>
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tags=l=>l.length?l.map(s=>`<span class="tag">${esc(s)}</span>`).join(''):'<em>nenhuma</em>';
+document.getElementById('btn').onclick=async()=>{const out=document.getElementById('out');out.textContent='Analisando…';
+const skills=document.getElementById('skills').value.split(',').map(s=>s.trim()).filter(Boolean);
+try{const r=await fetch('/analisar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texto:document.getElementById('texto').value,skills,salvar:false})});
+const d=await r.json();if(!r.ok){out.textContent='Erro: '+(d.detail||r.status);return}
+out.innerHTML=(d.usa_llm?'':'<p class="aviso"><b>Modo sem LLM:</b> nenhuma chave de LLM configurada neste deploy; a extração foi feita por palavras-chave (vocabulário fixo), não por IA.</p>')+
+`<h2>${esc(d.titulo)}</h2><p>Senioridade: <b>${esc(d.senioridade)}</b> · Modo: ${esc(d.modo)}</p><p class="score">Match: ${d.match_score}%</p>
+<h3>Obrigatórias</h3>${tags(d.skills_obrigatorias)}<h3>Desejáveis</h3>${tags(d.skills_desejaveis)}`}catch(e){out.textContent='Erro: '+e}};
+</script></body></html>

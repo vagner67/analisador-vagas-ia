@@ -23,7 +23,7 @@ analisador-vagas = "analisador_vagas.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-analisador_vagas = ["schema.sql"]
+analisador_vagas = ["schema.sql", "static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
