@@ -8,7 +8,7 @@ from importlib.resources import files
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import db
 from .heuristica import HeuristicaClient
@@ -80,6 +80,27 @@ def analisar_vaga(entrada: Entrada, cliente: LLMClient = Depends(get_cliente)) -
         finally:
             conn.close()
     return saida
+
+
+class EntradaLote(BaseModel):
+    textos: list[str] = Field(min_length=1, max_length=20)
+    skills: list[str] = []
+    concorrencia: int = Field(default=4, ge=1, le=8)
+
+
+@app.post("/analisar/lote")
+async def analisar_lote_endpoint(
+    entrada: EntradaLote, cliente: LLMClient = Depends(get_cliente)
+) -> dict:
+    """Analisa até 20 vagas concorrentemente (asyncio + semáforo). Não salva no banco."""
+    from .assincrono import analisar_lote
+
+    itens = await analisar_lote(entrada.textos, cliente, entrada.skills, entrada.concorrencia)
+    return {
+        "modo": cliente.nome,
+        "usa_llm": not isinstance(cliente, HeuristicaClient),
+        "resultados": [i.to_dict() for i in itens],
+    }
 
 
 @app.get("/relatorios/top-skills")

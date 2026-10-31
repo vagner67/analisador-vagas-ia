@@ -16,6 +16,7 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
+      - run: bash -n scripts/dev.sh
       - run: pytest -v
       - name: Evals (offline mode)
         run: python -m analisador_vagas.evals --markdown >> "$GITHUB_STEP_SUMMARY"

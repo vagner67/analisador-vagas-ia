@@ -48,13 +48,21 @@ flowchart LR
 ## Run
 
 ```bash
+./scripts/dev.sh setup                # venv + pip install -e ".[dev,api]"
+./scripts/dev.sh check                # ruff + pytest + offline evals (same as CI)
+./scripts/dev.sh run                  # uvicorn with --reload on :8000 (PORT=... to change)
+```
+
+Manual equivalent:
+
+```bash
 pip install -e ".[dev]"
 export GEMINI_API_KEY=...            # optional (or LLM_PROVIDER=openai + OPENAI_API_KEY)
 analisador-vagas analisar exemplos/vaga_exemplo.txt --skills python,sql
 analisador-vagas perguntar "Which postings require Kubernetes?"
 analisador-vagas agente "Qual o match da vaga 2 se eu sei python, sql e spark?"
 analisador-vagas relatorio top-skills
-uvicorn analisador_vagas.api:app      # POST /analisar /perguntar /agente · GET /relatorios/top-skills /health
+uvicorn analisador_vagas.api:app      # POST /analisar /analisar/lote /perguntar /agente · GET /relatorios/top-skills /health
 python -m analisador_vagas.evals --markdown
 docker compose up --build             # http://localhost:8000 (DEMO_SEED=1 loads example postings)
 ```
@@ -79,6 +87,40 @@ Live check (manual run on 2026-10-29 with `GEMINI_API_KEY`, `gemini-embedding-00
 "Quais vagas pedem Kubernetes?" → answer citing `[#7]` and `[#5]` (the two postings that list Kubernetes);
 the agent called `calcular_match(vaga_id=2, skills=[python, sql, spark])` and answered 48 with Airflow/AWS missing.
 
+## Design decisions / RAG trade-offs
+
+What the code actually does today, and what it costs:
+
+- **No chunking — one document per posting.** Each posting is indexed as a single document
+  (`title + seniority + extracted skills + original text`, see `rag._documentos`), truncated to 8,000 chars before
+  embedding. Postings are short, and the question is usually "which posting…", so whole-document retrieval keeps
+  citations trivially correct (`[#id]` = one posting). Trade-off: long postings lose their tail, and a question about
+  one paragraph competes with the whole document's signal; the LLM context uses only the first 400 chars per hit.
+- **Retrieval = brute-force cosine, no vector DB.** Vectors are cached as JSON in the SQLite table
+  `vaga_embeddings`, keyed by `(vaga_id, model)`, and embedded lazily only for postings missing from the cache. Scoring
+  is an O(n) Python loop. Fine for hundreds of postings and zero extra infra; it would need an ANN index (sqlite-vec,
+  pgvector, FAISS) at scale. Switching embedding models never mixes vectors because the model name is part of the key.
+- **Embeddings are optional.** With a key: `gemini-embedding-001` or `text-embedding-3-small` via plain REST
+  (`httpx`, no SDK). Without a key: a pure-Python **TF-IDF** index (accent-folded tokens, PT/EN stopwords, sublinear
+  tf). That is lexical, not semantic — the evals show it misses an English query against Portuguese text — and every
+  response is labelled `modo: offline` so it never pretends to be an LLM.
+- **Generation with enforced citations.** The prompt demands `[#id]`; cited ids are parsed and filtered to the
+  retrieved set (hallucinated ids are dropped; if none are cited, all retrieved ids are returned). Offline, the answer
+  is extractive (a list of the retrieved postings) instead of generated.
+- **No re-ranking, no hybrid search, no query rewriting.** Kept out deliberately to keep the pipeline small and
+  testable offline; hybrid BM25+vector would be the first addition if evals on real data showed misses.
+- **Evals.** A hand-labelled set in `tests/evals/` measures skill-extraction precision/recall and retrieval
+  hit@1/hit@3/MRR. They run offline in pytest and CI (published to the job summary). LLM-mode evals need a key and
+  are not in CI — the offline numbers are a floor/baseline, not a measure of the LLM path.
+- **Async where it pays off.** `POST /analisar/lote` is an `async def` endpoint that analyses up to 20 postings
+  concurrently (`assincrono.analisar_lote`). The LLM clients use blocking `httpx`, so each call runs in a worker
+  thread via `asyncio.to_thread`, bounded by an `asyncio.Semaphore` (`concorrencia`, 1–8) to respect provider rate
+  limits, with optional per-item timeout and per-item error isolation. Trade-off: threads instead of a native
+  `httpx.AsyncClient` avoid duplicating every client, at the cost of one thread per in-flight call. Tests
+  (`tests/test_async.py`, anyio) assert real overlap, the semaphore cap, ordering, timeouts and error isolation.
+- **SQLite** for storage and SQL reports: zero-ops, file-based; on Vercel it lives in `/tmp` and is ephemeral
+  (demo is re-seeded with example postings).
+
 ---
 
 # Português
@@ -100,3 +142,27 @@ skills obrigatórias pesam 80% e desejáveis 20%. Sem chave de API, nenhuma resp
 `offline`.
 
 Licença MIT.
+
+## Decisões de design / trade-offs do RAG
+
+- **Sem chunking — um documento por vaga** (`título + senioridade + skills + texto`), truncado em 8.000 caracteres
+  para embedding. Citação fica trivialmente correta (`[#id]` = uma vaga); em troca, vagas longas perdem o final e o
+  contexto do LLM usa só os 400 primeiros caracteres de cada vaga recuperada.
+- **Recuperação por cosseno em força bruta, sem banco vetorial.** Vetores cacheados em JSON na tabela SQLite
+  `vaga_embeddings` com chave `(vaga_id, modelo)` e gerados só para vagas novas. Serve para centenas de vagas sem
+  infra extra; em escala precisaria de índice ANN (sqlite-vec, pgvector, FAISS).
+- **Embeddings opcionais.** Com chave: `gemini-embedding-001` ou `text-embedding-3-small` via REST. Sem chave:
+  **TF-IDF** em Python puro — busca lexical, não semântica (os evals mostram a falha numa pergunta em inglês sobre
+  texto em português), sempre rotulada `modo: offline`.
+- **Geração com citação obrigatória**: ids citados são validados contra os recuperados (ids inventados são
+  descartados). Offline, a resposta é extrativa.
+- **Sem re-ranking, busca híbrida ou reescrita de consulta** — de propósito, para manter o pipeline pequeno e
+  testável offline; BM25+vetor seria o primeiro acréscimo.
+- **Evals** rotulados à mão (precisão/recall de skills, hit@k/MRR) rodam offline no pytest e no CI; evals do modo
+  LLM exigem chave e não estão no CI.
+- **Async onde compensa**: `POST /analisar/lote` (`async def`) analisa até 20 vagas em paralelo com
+  `asyncio.to_thread` + `asyncio.Semaphore` (limite 1–8, respeita rate limit), timeout e isolamento de erro por item.
+  Threads em vez de `httpx.AsyncClient` evitam duplicar os clientes; testes em `tests/test_async.py` (anyio).
+- **SQLite**: zero operação; na Vercel fica em `/tmp` (efêmero, demo repovoada com vagas de exemplo).
+
+Atalhos: `./scripts/dev.sh setup | test | lint | evals | run | check`.
